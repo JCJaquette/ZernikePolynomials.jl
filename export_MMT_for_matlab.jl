@@ -189,23 +189,26 @@ end
 # -------------------------------------------------------------------------------------
 # export_N: build, verify <=1 ULP, bump precision + rebuild if not, then matwrite one file.
 # -------------------------------------------------------------------------------------
-function export_N(N; precision, eps_N=1e-40, outdir, eigfun=proof_full_eigen,
+# eps_N=nothing (default) derives eps_N from precision via eps_N_for and RECOMPUTES it on
+# each precision bump; pass a number to pin a fixed eps_N (debugging / correctness gate).
+function export_N(N; precision, eps_N=nothing, outdir, eigfun=proof_full_eigen,
                   max_bumps=3, ulp_tol=1.0 + 1e-6)
     p = precision
     local d, maxulp
     ok = false
     for attempt in 0:max_bumps
+        en = eps_N === nothing ? eps_N_for(p) : eps_N
         t = @elapsed begin
-            MMT_data, iMMT_data = build_N(N; precision=p, eps_N=eps_N, eigfun=eigfun)
-            d, maxulp = pack(N, MMT_data, iMMT_data, p, eps_N)
+            MMT_data, iMMT_data = build_N(N; precision=p, eps_N=en, eigfun=eigfun)
+            d, maxulp = pack(N, MMT_data, iMMT_data, p, en)
         end
-        @printf("  N=%d n=%d prec=%d  maxULP=%.3g  (%.1fs)\n", N, 2N - 1, p, maxulp, t)
+        @printf("  N=%d n=%d prec=%d eps_N=%.2g  maxULP=%.3g  (%.1fs)\n", N, 2N - 1, p, en, maxulp, t)
         flush(stdout)
         if maxulp <= ulp_tol
             ok = true
             break
         end
-        p += 128                                                # not tight enough -> more bits
+        p += 128                                                # not tight enough -> more bits (eps_N tightens with it)
     end
     mkpath(outdir)
     fname = joinpath(outdir, @sprintf("MMT_data_N%03d.mat", N))
@@ -218,7 +221,19 @@ end
 # -------------------------------------------------------------------------------------
 default_precision(n) = max(256, 64 * cld(round(Int, 2.5 * n), 64))
 
-function export_all(; Nlist, outdir, precision_fn=default_precision, eps_N=1e-40,
+# eps_N policy — the Newton residual target for newton_eig, as a function of working
+# precision. newton_eig drives the eigenpair residual ‖B·V − v·V‖ down to eps_N; that
+# residual floor is ~2^-precision (reachable regardless of eigenvalue clustering). The
+# VALIDATED node radius is rmin ≈ residual × ‖inv(T)‖, and ‖inv(T)‖ (the eigenvalue-gap
+# conditioning) blows up with n — ~2^90 at n=151. A FIXED eps_N=1e-40 therefore pinned
+# rmin at 1e-40·2^90 ≈ 1e-13 ≈ 480 ULP at n=151, and bumping precision alone never moved
+# it (Newton still stopped at the 1e-40 target). Tying eps_N to precision at 2^(-0.9·p)
+# keeps it ~10% above the 2^-p residual floor — reached in a few quadratic Newton steps —
+# yet vastly tighter than 1e-40, so rmin tracks precision and each bump genuinely tightens
+# it. Returned as Float64 (representable for all p ≤ ~1000 we use; underflow only past that).
+eps_N_for(precision) = 2.0^(-0.9 * precision)
+
+function export_all(; Nlist, outdir, precision_fn=default_precision, eps_N=nothing,
                     eigfun=proof_full_eigen)
     mkpath(outdir)
     println("Exporting to: ", outdir, "  (serial, eigfun=", nameof(eigfun), ")")
@@ -286,18 +301,20 @@ end
 
 # export_N_dist — build one N via the Distributed eigenpair proofs, verify <=1 ULP (bump
 # precision + rebuild if not), write one .mat. Same output/contract as export_N.
-function export_N_dist(N; precision, eps_N=1e-40, outdir, pool,
+# eps_N=nothing (default) derives eps_N from precision (recomputed on each bump); see export_N.
+function export_N_dist(N; precision, eps_N=nothing, outdir, pool,
                        max_bumps=3, ulp_tol=1.0 + 1e-6)
     p = precision
     local d, maxulp
     ok = false
     for attempt in 0:max_bumps
+        en = eps_N === nothing ? eps_N_for(p) : eps_N
         t = @elapsed begin
-            outs = [master_kout_dist(2N - 1, kk, p, eps_N, pool) for kk in 0:1]
+            outs = [master_kout_dist(2N - 1, kk, p, en, pool) for kk in 0:1]
             MMT_data, iMMT_data = build_N_from(outs, N)
-            d, maxulp = pack(N, MMT_data, iMMT_data, p, eps_N)
+            d, maxulp = pack(N, MMT_data, iMMT_data, p, en)
         end
-        @printf("  N=%d n=%d prec=%d  maxULP=%.3g  (%.1fs)\n", N, 2N - 1, p, maxulp, t)
+        @printf("  N=%d n=%d prec=%d eps_N=%.2g  maxULP=%.3g  (%.1fs)\n", N, 2N - 1, p, en, maxulp, t)
         flush(stdout)
         if maxulp <= ulp_tol
             ok = true
@@ -311,11 +328,54 @@ function export_N_dist(N; precision, eps_N=1e-40, outdir, pool,
     return (N=N, n=2N - 1, precision=p, maxULP=maxulp, ok=ok, file=fname)
 end
 
+# machine_report — one-time hardware/config block for the run log, so a past run's per-N
+# timings can be read in the context of the machine that produced them (and reused to
+# estimate future runs). Returns a printable string.
+function machine_report(; nw, heap_hint)
+    io = IOBuffer()
+    cpus = Sys.cpu_info()
+    cpumodel = isempty(cpus) ? "?" : strip(cpus[1].model)
+    cpuspeed = isempty(cpus) ? 0 : cpus[1].speed
+    blasstr = try
+        join([basename(String(l.libname)) for l in BLAS.get_config().loaded_libs], ", ")
+    catch
+        "(unknown)"
+    end
+    println(io, "="^72)
+    println(io, "MMT/iMMT validated export — run log")
+    println(io, "started:          ", Dates.now())
+    println(io, "-"^72)
+    println(io, "CPU model:        ", cpumodel)
+    @printf(io, "CPU base clock:   %d MHz\n", cpuspeed)
+    println(io, "logical procs:    ", Sys.CPU_THREADS, "  (Sys.cpu_info entries: ", length(cpus), ")")
+    @printf(io, "total RAM:        %.1f GB\n", Sys.total_memory() / 2^30)
+    @printf(io, "free RAM (start): %.1f GB\n", Sys.free_memory() / 2^30)
+    println(io, "machine / kernel: ", Sys.MACHINE, "  /  ", Sys.KERNEL, " ", Sys.WORD_SIZE, "-bit")
+    println(io, "Julia version:    ", VERSION)
+    println(io, "BLAS libs:        ", blasstr, "  (num_threads=1 per worker)")
+    println(io, "worker procs:     ", nw, "   (+1 master)")
+    println(io, "--heap-size-hint: ", heap_hint, " per worker")
+    println(io, "precision sched:  default_precision(n) = max(256, 64*ceil(2.5n/64)) bits")
+    println(io, "eps_N policy:     eps_N_for(p) = 2^(-0.9 p)")
+    println(io, "="^72)
+    return String(take!(io))
+end
+
 # export_all_dist — spin up `nw` worker processes (own heaps, capped by --heap-size-hint),
 # load the code on each, then export every N biggest-first (fail fast on memory/precision).
-function export_all_dist(; Nlist, outdir, precision_fn=default_precision, eps_N=1e-40,
-                         nw::Int=8, heap_hint::AbstractString="1500M")
+# A run log (machine specs + per-N timing) is written incrementally to `logfile` (default:
+# <repo>/logs/timing_<timestamp>.txt) so partial timings survive a crash and future long
+# runs can be estimated from past hardware-stamped data.
+function export_all_dist(; Nlist, outdir, precision_fn=default_precision, eps_N=nothing,
+                         nw::Int=8, heap_hint::AbstractString="1500M", logfile=nothing)
     mkpath(outdir)
+    if logfile === nothing
+        logdir = joinpath(_HERE, "logs")
+        mkpath(logdir)
+        logfile = joinpath(logdir, "timing_" * Dates.format(Dates.now(), "yyyymmdd_HHMMSS") * ".txt")
+    else
+        mkpath(dirname(logfile))
+    end
     thisfile = joinpath(_HERE, "export_MMT_for_matlab.jl")
     need = (nw + 1) - nprocs()
     need > 0 && addprocs(need; exeflags=["--heap-size-hint=$heap_hint"])
@@ -324,21 +384,49 @@ function export_all_dist(; Nlist, outdir, precision_fn=default_precision, eps_N=
         remotecall_wait(BLAS.set_num_threads, pid, 1)       # no BLAS oversubscription per worker
     end
     pool = WorkerPool(workers())
-    println("Exporting to: ", outdir)
-    println("Distributed: workers=", nworkers(), "  heap_hint=", heap_hint)
-    results = NamedTuple[]
-    for N in sort(collect(Nlist); rev=true)                 # biggest N first
-        r = export_N_dist(N; precision=precision_fn(2N - 1), eps_N=eps_N, outdir=outdir, pool=pool)
-        push!(results, r)
-        @printf("N=%-4d n=%-4d prec=%-4d maxULP=%.3g  %s -> %s\n",
-                r.N, r.n, r.precision, r.maxULP, r.ok ? "OK" : "!! >1 ULP", basename(r.file))
-        flush(stdout)
+
+    header = machine_report(; nw=nworkers(), heap_hint=heap_hint)
+    colhdr = @sprintf("%-5s %-5s %-6s %-10s %-9s %-9s %s",
+                      "N", "n", "prec", "eps_N", "maxULP", "wall_s", "status")
+    open(logfile, "w") do io
+        print(io, header)
+        println(io, colhdr)
     end
+    print(header)
+    println("Exporting to: ", outdir)
+    println("Log file:     ", logfile)
+    println(colhdr); flush(stdout)
+
+    results = NamedTuple[]
+    run_t0 = time()
+    for N in sort(collect(Nlist); rev=true)                 # biggest N first
+        el = @elapsed r = export_N_dist(N; precision=precision_fn(2N - 1), eps_N=eps_N,
+                                        outdir=outdir, pool=pool)
+        push!(results, r)
+        en = eps_N === nothing ? eps_N_for(r.precision) : eps_N
+        line = @sprintf("%-5d %-5d %-6d %-10.2e %-9.4g %-9.1f %s",
+                        r.N, r.n, r.precision, en, r.maxULP, el, r.ok ? "OK" : "!! >1ULP")
+        open(logfile, "a") do io
+            println(io, line)
+            flush(io)
+        end
+        println(line); flush(stdout)
+    end
+    total = time() - run_t0
+
     sort!(results; by=r -> r.N)
+    open(logfile, "a") do io
+        println(io, "-"^72)
+        @printf(io, "total wall:       %.1f s  (%.2f h)  over %d values of N\n",
+                total, total / 3600, length(results))
+        @printf(io, "free RAM (end):   %.1f GB\n", Sys.free_memory() / 2^30)
+        println(io, "finished:         ", Dates.now())
+    end
     println("\nSummary:")
     for r in results
         @printf("  N=%-4d maxULP=%.3g  %s\n", r.N, r.maxULP, r.ok ? "OK" : "!! NOT 1-ULP")
     end
+    @printf("Total wall: %.1f s (%.2f h).  Log: %s\n", total, total / 3600, logfile)
     return results
 end
 
@@ -351,10 +439,11 @@ if abspath(PROGRAM_FILE) == @__FILE__
     elseif mode == "distquick"                # Distributed, small: exercise the worker path
         nw = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 3
         export_all_dist(Nlist=[10, 20], outdir=outdir, precision_fn=(n -> 256), nw=nw)
-    elseif mode == "production"               # Distributed, full sweep (overnight)
+    elseif mode == "production"               # Distributed sweep: production [nw] [Nmax]
         nw = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 8
-        export_all_dist(Nlist=10:10:150, outdir=outdir, nw=nw)
+        Nmax = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 150
+        export_all_dist(Nlist=10:10:Nmax, outdir=outdir, nw=nw)
     else
-        error("unknown mode $mode (use \"quick\" | \"distquick [nw]\" | \"production [nw]\")")
+        error("unknown mode $mode (use \"quick\" | \"distquick [nw]\" | \"production [nw] [Nmax]\")")
     end
 end

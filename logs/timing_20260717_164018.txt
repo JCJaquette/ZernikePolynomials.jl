@@ -1,0 +1,18 @@
+========================================================================
+MMT/iMMT validated export — run log
+started:          2026-07-17T16:40:32.978
+------------------------------------------------------------------------
+CPU model:        Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz
+CPU base clock:   3792 MHz
+logical procs:    16  (Sys.cpu_info entries: 16)
+total RAM:        31.8 GB
+free RAM (start): 5.7 GB
+machine / kernel: x86_64-w64-mingw32  /  NT 64-bit
+Julia version:    1.10.5
+BLAS libs:        libopenblas64_.dll  (num_threads=1 per worker)
+worker procs:     8   (+1 master)
+--heap-size-hint: 1500M per worker
+precision sched:  default_precision(n) = max(256, 64*ceil(2.5n/64)) bits
+eps_N policy:     eps_N_for(p) = 2^(-0.9 p)
+========================================================================
+N     n     prec   eps_N      maxULP    wall_s    status
