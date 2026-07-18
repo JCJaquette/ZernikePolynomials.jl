@@ -1,12 +1,12 @@
 ========================================================================
 MMT/iMMT validated export — run log
-started:          2026-07-17T16:40:32.978
+started:          2026-07-17T18:05:28.448
 ------------------------------------------------------------------------
 CPU model:        Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz
 CPU base clock:   3792 MHz
 logical procs:    16  (Sys.cpu_info entries: 16)
 total RAM:        31.8 GB
-free RAM (start): 5.7 GB
+free RAM (start): 13.4 GB
 machine / kernel: x86_64-w64-mingw32  /  NT 64-bit
 Julia version:    1.10.5
 BLAS libs:        libopenblas64_.dll  (num_threads=1 per worker)
@@ -16,17 +16,12 @@ precision sched:  default_precision(n) = max(256, 64*ceil(2.5n/64)) bits
 eps_N policy:     eps_N_for(p) = 2^(-0.9 p)
 ========================================================================
 N     n     prec   eps_N      maxULP    wall_s    status
-100   199   512    1.93e-139  0.8911    1725.8    OK
-90    179   448    4.21e-122  0.8606    995.2     OK
-80    159   448    4.21e-122  0.9687    621.7     OK
-70    139   384    9.21e-105  0.761     348.2     OK
-60    119   320    2.01e-87   0.8895    179.3     OK
-50    99    256    4.39e-70   0.9998    79.1      OK
-40    79    256    4.39e-70   0.9733    33.3      OK
-30    59    256    4.39e-70   0.9009    11.0      OK
-20    39    256    4.39e-70   0.9824    2.5       OK
-10    19    256    4.39e-70   0.9624    0.4       OK
+150   299   768    8.47e-209  0.8644    10000.2   OK
+140   279   704    1.85e-191  0.8352    7447.8    OK
+130   259   704    1.85e-191  0.8154    7038.2    OK
+120   239   640    4.04e-174  0.9744    3878.0    OK
+110   219   576    8.83e-157  0.9647    2467.6    OK
 ------------------------------------------------------------------------
-total wall:       3997.1 s  (1.11 h)  over 10 values of N
-free RAM (end):   8.7 GB
-finished:         2026-07-17T17:47:10.692
+total wall:       30832.4 s  (8.56 h)  over 5 values of N
+free RAM (end):   11.2 GB
+finished:         2026-07-18T02:39:21.352
